@@ -178,13 +178,13 @@ class Gerbil:
         ## @var cmpos
         # Get a 3-tuple containing the current coordinates relative
         # to the machine origin.
-        self.cmpos = (0, 0, 0)
+        self.cmpos = (0, 0, 0, 0) # JAC added 4th tuple for 4 axis firmware
         
         ## @var cwpos
         # Get a 3-tuple containing the current working coordinates.
         # Working coordinates are relative to the currently selected
         # coordinate system.
-        self.cwpos = (0, 0, 0)
+        self.cwpos = (0, 0, 0, 0) # JAC added 4th tuple for 4-axis firmware
         
         ## @var gps
         # Get list of 12 elements containing the 12 Gcode Parser State
@@ -303,8 +303,8 @@ class Gerbil:
         self._last_setting_number = 132
         
         self._last_cmode = None
-        self._last_cmpos = (0, 0, 0)
-        self._last_cwpos = (0, 0, 0)
+        self._last_cmpos = (0, 0, 0, 0) # JAC expanded, adding 4th axis ref
+        self._last_cwpos = (0, 0, 0, 0) # JAC expanded, adding 4th axis ref
         
         self._standstill_watchdog_increment = 0
         
@@ -903,7 +903,7 @@ class Gerbil:
             line = self._queue.get()
             
             if len(line) > 0:
-                if line[0] == "<":
+                if line[0] == "<": # If the line starts with < then it is a grbl status line, call the update_state function
                     self._update_state(line)
                     
                 elif line == "ok":
@@ -914,7 +914,7 @@ class Gerbil:
                     self._callback("on_read", line)
                     
                 elif re.match("^\[...:.*", line):
-                    self._update_hash_state(line)
+                    #self._update_hash_state(line)
                     self._callback("on_read", line)
                         
                     if "PRB" in line:
@@ -990,6 +990,7 @@ class Gerbil:
         self._callback("on_boot")
         
     def _update_hash_state(self, line):
+        print(line)
         line = line.replace("]", "").replace("[", "")
         parts = line.split(":")
         key = parts[0]
@@ -1019,12 +1020,80 @@ class Gerbil:
             self.logger.error("{}: Could not parse gcode parser report: '{}'".format(self.name, line))
         
     def _update_state(self, line):
-        m = re.match("<(.*?),MPos:(.*?),WPos:(.*?)>", line)
-        self.cmode = m.group(1)
-        mpos_parts = m.group(2).split(",")
-        wpos_parts = m.group(3).split(",")
-        self.cmpos = (float(mpos_parts[0]), float(mpos_parts[1]), float(mpos_parts[2]))
-        self.cwpos = (float(wpos_parts[0]), float(wpos_parts[1]), float(wpos_parts[2]))
+        #twistedpipes — Today at 12:55 PM
+        #x = float(blah)
+        #except:
+        #blah
+
+        # References:
+        # https://mkyong.com/python/python-how-to-split-string-into-a-dict/
+
+        # Check if this is already done before we get the string
+        line = line.rstrip() # Strip trailing newlines and whitespace, if present
+
+        """
+
+        Machine State:
+
+            Valid states types: Idle, Run, Hold, Jog, Alarm, Door, Check, Home, Sleep
+
+            Sub-states may be included via : a colon delimiter and numeric code.
+
+            Current sub-states are:
+
+            - `Hold:0` Hold complete. Ready to resume.
+            - `Hold:1` Hold in-progress. Reset will throw an alarm.
+            - `Door:0` Door closed. Ready to resume.
+            - `Door:1` Machine stopped. Door still ajar. Can't resume until closed.
+            - `Door:2` Door opened. Hold (or parking retract) in-progress. Reset will throw an alarm.
+            - `Door:3` Door closed and resuming. Restoring from park, if applicable. Reset will throw an alarm.
+
+            This data field is always present as the first field.
+
+        """
+        machine_state_substates = [ "Hold", "Door" ] # States that may (do always?) have a subcode
+        machine_state_single = [ "Idle", "Run", "Jog", "Alarm", "Check", "Home", "Sleep" ] # Known states with a single code, no sub code
+
+        for substate in machine_state_substates: # Is the a status that supports substates?
+            if substate in line:
+                checkstate = substate + ":" # Add the colon and retest to see if substate is present
+                if checkstate in line:
+                    newstate = checkstate.replace( ':', ',' ) # Change delimiter to comma to match other entries for ingest
+                    newstate = "State:" + newstate # Pre-pend Status: to the start to match other entries for ingest
+                    line = line.replace( checkstate, newstate) # Update the line
+            #elif:
+                 # TBD once we confirm if you would ever get HOLD or DOOR without a substate attached.
+
+        for single_state in machine_state_single: # Iterate through states that have no sub state
+                if single_state in line: # Check if the state is present in the status line we received
+                    new_state = "State:" + single_state + ",0" # Pre-pend Status: and add ,0 to match our format for ingest
+                    line = line.replace( single_state, new_state )
+
+        line = line[1:-1] # Strip < from first and > from last character
+        line = line.replace(',', ' ') # Replace commans with spaces for delimiters within field for ingest to dictionary
+
+        # Ingest line contents in to a dictionary called  called grbl_11_status, splitting the line on | then splitting the name/values on colon and sub-values on space
+        grbl_11_status = dict(x.split(":") for x in line.split("|"))
+
+        # grbl_11_status.items()
+        # Iterate through dictionary and display values
+        for k, v in grbl_11_status.items():
+            print(k, v, end=" ")
+        print()
+
+        self.cmode = grbl_11_status["State"][0] # Update the state variable
+        mpos_parts = grbl_11_status["MPos"].split() # Put the Macchine Position list in to another list (can't we streamline) so we can declare it as floats and send it upstream
+#        print(mpos_parts) # For debug, to remove
+#        mpos_parts = m.group(2).split(",")
+#         mpos_parts = grbl_11_status["Mpos"]
+#        wpos_parts = m.group(3).split(",")
+#	 if grbl_11_status["Wpos"] is not None:
+#             wpos_parts = grbl_11_status["Wpos"]
+
+        self.cmpos = (float(mpos_parts[0]), float(mpos_parts[1]), float(mpos_parts[2]), float(mpos_parts[3]))
+#        self.cmpos = (float(grbl_11_status[MPos][0]), float(grbl_11_status[MPos][1]), float(grbl_11_status[MPos][2]), float(grbl_11_status[MPos][3]))
+#        if wpos_parts is not None:
+#            self.cwpos = (float(wpos_parts[0]), float(wpos_parts[1]), float(wpos_parts[2]), float(wpos_parts[3]))
 
         if (self.cmode != self._last_cmode or
             self.cmpos != self._last_cmpos or

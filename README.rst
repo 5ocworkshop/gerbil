@@ -1,6 +1,4 @@
-Note - This fork is a WIP and is aimed at adding grbl1.1 message support
-Target platform is RPi connected to HAL2000 grblHAL board for PrintNC CNC Machine
-wiki.printnc.info
+** Note - This fork is a WIP and is aimed at adding grbl1.1 message support.  The target platform is an RPi connected to HAL2000 grblHAL board for PrintNC CNC Machine (wiki.printnc.info)
 
 Gerbil -- Universal grbl interface module for Python3
 =======================================================

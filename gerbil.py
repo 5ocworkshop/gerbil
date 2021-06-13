@@ -1020,14 +1020,23 @@ class Gerbil:
             self.logger.error("{}: Could not parse gcode parser report: '{}'".format(self.name, line))
         
     def _update_state(self, line):
+        grbl_11_status = {} # Create the status dictionary
+        grbl_11_wco_last = []
+        wco_parts = None
+        wco_parts = grbl_11_wco_last.copy()
+
+        if grbl_11_status: # If the dictionary already exists & isn't empty, clear so we don't carry over any stale information
+            grbl_11_status.clear()
+
         #twistedpipes — Today at 12:55 PM
         #x = float(blah)
         #except:
         #blah
 
         # References:
+        # grbl 1.1 Message Format (mostly in-line below), is here https://github.com/gnea/grbl/wiki/Grbl-v1.1-Interface
         # https://mkyong.com/python/python-how-to-split-string-into-a-dict/
-
+        # 
         # Check if this is already done before we get the string
         line = line.rstrip() # Strip trailing newlines and whitespace, if present
 
@@ -1076,21 +1085,100 @@ class Gerbil:
         grbl_11_status = dict(x.split(":") for x in line.split("|"))
 
         # grbl_11_status.items()
-        # Iterate through dictionary and display values
+        # Iterate through dictionary and display values FOR DEBUG
         for k, v in grbl_11_status.items():
             print(k, v, end=" ")
         print()
 
         self.cmode = grbl_11_status["State"][0] # Update the state variable
-        mpos_parts = grbl_11_status["MPos"].split() # Put the Macchine Position list in to another list (can't we streamline) so we can declare it as floats and send it upstream
-#        print(mpos_parts) # For debug, to remove
-#        mpos_parts = m.group(2).split(",")
-#         mpos_parts = grbl_11_status["Mpos"]
+
+        """
+        Current Position:
+
+            Depending on $10 status report mask settings, position may be sent as either:
+                MPos:0.000,-10.000,5.000 machine position or
+                WPos:-2.500,0.000,11.000 work position
+
+            NOTE: Grbl v1.1 sends only one position vector because a GUI can easily compute the other position vector with the work coordinate offset WCO: data. See WCO description for details.
+
+            Three position values are given in the order of X, Y, and Z. A fourth position value may exist in later versions for the A-axis.
+
+            $13 report inches user setting effects these values and is given as either mm or inches.
+
+            This data field is always present as the second field.
+
+        Work Coordinate Offset:
+
+            WCO:0.000,1.551,5.664 is the current work coordinate offset of the g-code parser, which is the sum of the current work coordinate system, G92 offsets, and G43.1 tool length offset.
+
+            Machine position and work position are related by this simple equation per axis: WPos = MPos - WCO
+                GUI Developers: Simply track and retain the last WCO: vector and use the above equation to compute the other position vector for your position readouts. If Grbl's status reports show either WPos or MPos, just follow the equations below. It's as easy as that!
+                    If WPos: is given, use MPos = WPos + WCO.
+                    If MPos: is given, use WPos = MPos - WCO.
+
+            Values are given in the order of the X,Y, and Z axes offsets. A fourth offset value may exist in later versions for the A-axis.
+
+            $13 report inches user setting effects these values and is given as either mm or inches.
+
+            WCO: values don't change often during a job once set and only requires intermittent refreshing.
+
+            This data field appears:
+                In every 10 or 30 (configurable 1-255) status reports, depending on if Grbl is in a motion state or not.
+                Immediately in the next report, if an offset value has changed.
+                In the first report after a reset/power-cycle.
+
+            This data field will not appear if:
+                It is disabled in the config.h file. No $ mask setting available.
+                The refresh counter is in-between intermittent reports.
+        """
+
+        if "MPos" in grbl_11_status.keys():
+            mpos_parts = grbl_11_status["MPos"].split() # Put the Macchine Position list in to another list (can't we streamline) so we can declare it as floats and send it upstream?
+            print("Have MPos: ", mpos_parts)
+            self.cmpos = (float(mpos_parts[0]), float(mpos_parts[1]), float(mpos_parts[2]), float(mpos_parts[3])) # Make the MPos available globally
+            wpos = None
+
+            if "WCO" in grbl_11_status.keys(): # If MPos then we must calculate WPos from WCO, with WPos = MPos - WCO
+                wco_parts = grbl_11_status["WCO"].split()
+                print("Have Offset: ", wco_parts)
+                # Don't calculate wpos until we have received our first WCO update, on first run we can't assume we have it
+                wpos = [ (float(mpos_parts[0])) - (float(wco_parts[0])), (float(mpos_parts[1])) - (float(wco_parts[1])), (float(mpos_parts[2])) - (float(wco_parts[2])), (float(mpos_parts[3])) - (float(wco_parts[3])) ]
+                print("Calculated WPos: ", wpos)
+                grbl_11_wco_last = wco_parts.copy()
+                print(wco_parts)
+
+            else:
+                print("Stored WOC: ", wco_parts)
+                wpos = [ (float(mpos_parts[0])) - (float(wco_parts[0])), (float(mpos_parts[1])) - (float(wco_parts[1])), (float(mpos_parts[2])) - (float(wco_parts[2])), (float(mpos_parts[3])) - (float(wco_parts[3])) ]
+                print("Interpolated WPos: ", wpos)
+
+
+        if "WPos" in grbl_11_status.keys():
+            wpos_parts = grbl_11_status["WPos"].split() # Put the Macchine Position list in to another list (can't we streamline) so we can declare it as floats and send it upstream?
+            print("Have WPos: :", wpos_parts)
+            self.cwpos = (float(wpos_parts[0]), float(wpos_parts[1]), float(wpos_parts[2]), float(wpos_parts[3])) # Make the WPos available globally
+            mpos = None
+
+            if "WCO" in grbl_11_status.keys(): # If WPos then we must calculate MPos from WCO, with MPos = WPos + WCO, first confirm we have the information
+                wco_parts = grbl_11_status["WCO"].split()
+                print("Have Offset: ", wco_parts)
+                # Don't calculate mpos until we have received our first WCO update, on first run we can't assume we have it
+                mpos = [ (float(wpos_parts[0])) + (float(wco_parts[0])), (float(wpos_parts[1])) + (float(wco_parts[1])), (float(wpos_parts[2])) + (float(wco_parts[2])), (float(wpos_parts[3])) + (float(wco_parts[3])) ]
+                print("Calculated MPos: ", mpos)
+                grbl_11_wco_last = wco_parts.copy()
+
+            else:
+                mpos = [ (float(wpos_parts[0])) + (float(wco_parts[0])), (float(wpos_parts[1])) + (float(wco_parts[1])), (float(wpos_parts[2])) + (float(wco_parts[2])), (float(wpos_parts[3])) + (float(wco_parts[3])) ]
+                print("Interpolated MPos: ", mpos)
+
+#        wpos_parts = m.group(3).split(",")
+#	 if grbl_11_status["Wpos"] is not None:
+
+
 #        wpos_parts = m.group(3).split(",")
 #	 if grbl_11_status["Wpos"] is not None:
 #             wpos_parts = grbl_11_status["Wpos"]
 
-        self.cmpos = (float(mpos_parts[0]), float(mpos_parts[1]), float(mpos_parts[2]), float(mpos_parts[3]))
 #        self.cmpos = (float(grbl_11_status[MPos][0]), float(grbl_11_status[MPos][1]), float(grbl_11_status[MPos][2]), float(grbl_11_status[MPos][3]))
 #        if wpos_parts is not None:
 #            self.cwpos = (float(wpos_parts[0]), float(wpos_parts[1]), float(wpos_parts[2]), float(wpos_parts[3]))
